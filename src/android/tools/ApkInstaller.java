@@ -96,7 +96,7 @@ public class ApkInstaller {
 
         Process process = null;
         try {
-            process = Runtime.getRuntime().exec(new String[]{"su", "-c", command});
+            process = Runtime.getRuntime().exec(new String[]{"su", "0", command});
             StringBuilder builder = new StringBuilder();
 
             BufferedReader stdOut = new BufferedReader(new InputStreamReader(process.getInputStream()));
