@@ -35,5 +35,8 @@
   "bugs": {
     "url": "https://github.com/kolbasa/cordova-plugin-apkupdater/issues"
   },
-  "homepage": "https://github.com/kolbasa/cordova-plugin-apkupdater"
+  "homepage": "https://github.com/kolbasa/cordova-plugin-apkupdater",
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
 }
