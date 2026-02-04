@@ -312,6 +312,8 @@ If you want to test this on an emulator, I can recommend the following script: [
 await ApkUpdater.rootInstall();
 ```
 
+If root installation fails, the plugin falls back to the standard interactive install flow.
+
 ### isDeviceRooted()
 
 ```js

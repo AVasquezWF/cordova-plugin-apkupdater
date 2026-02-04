@@ -19,12 +19,34 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 
 import de.kolbasa.apkupdater.exceptions.InstallationFailedException;
 import de.kolbasa.apkupdater.exceptions.InvalidPackageException;
 import de.kolbasa.apkupdater.exceptions.RootException;
 
 public class ApkInstaller {
+
+    private static final class CommandResult {
+        private final int exitCode;
+        private final String output;
+
+        private CommandResult(int exitCode, String output) {
+            this.exitCode = exitCode;
+            this.output = output;
+        }
+    }
+
+    private static final class SuCommand {
+        private final String[] command;
+        private final String stdin;
+
+        private SuCommand(String[] command, String stdin) {
+            this.command = command;
+            this.stdin = stdin;
+        }
+    }
 
     private static Uri getUpdate(Context context, File update) throws IOException {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -64,19 +86,38 @@ public class ApkInstaller {
      * https://stackoverflow.com/a/39420232
      */
     public static boolean requestRootAccess() throws RootException {
-        Process process = null;
-        try {
-            process = Runtime.getRuntime().exec(new String[]{"su", "-c", "id"});
-            BufferedReader in = new BufferedReader(new InputStreamReader(process.getInputStream()));
-            String output = in.readLine();
-            return output != null && output.toLowerCase().contains("uid=0");
-        } catch (Exception e) {
-            throw new RootException(e);
-        } finally {
-            if (process != null) {
-                process.destroy();
+        String command = "id";
+        String stdin = command + "\nexit\n";
+        SuCommand[] commands = new SuCommand[]{
+                new SuCommand(new String[]{"su", "0", "sh", "-c", command}, null),
+                new SuCommand(new String[]{"su", "0", command}, null),
+                new SuCommand(new String[]{"su", "-c", command}, null),
+                new SuCommand(new String[]{"su", "0"}, stdin),
+                new SuCommand(new String[]{"su"}, stdin)
+        };
+
+        String lastOutput = "";
+        Exception lastException = null;
+
+        for (SuCommand suCommand : commands) {
+            try {
+                CommandResult result = execCommand(suCommand.command, suCommand.stdin);
+                String output = result.output == null ? "" : result.output;
+                lastOutput = output;
+                if (output.toLowerCase(Locale.US).contains("uid=0")) {
+                    return true;
+                }
+            } catch (Exception e) {
+                lastException = e;
+                lastOutput = e.getMessage();
             }
         }
+
+        if (lastException != null) {
+            throw new RootException(new Exception("su check failed (missing -c or uid support?): " + lastOutput, lastException));
+        }
+
+        return false;
     }
 
     public static void rootInstall(Context context, File update) throws IOException,
@@ -94,34 +135,45 @@ public class ApkInstaller {
             command += " && am start -n " + packageName + "/" + mainActivity;
         }
 
-        Process process = null;
-        try {
-            process = Runtime.getRuntime().exec(new String[]{"su", "0", command});
-            StringBuilder builder = new StringBuilder();
+        // Try multiple su variants, including stdin fallback for su builds without -c support.
+        String stdin = command + "\nexit\n";
+        SuCommand[] suCommands = new SuCommand[]{
+                new SuCommand(new String[]{"su", "0", "sh", "-c", command}, null),
+                new SuCommand(new String[]{"su", "0", command}, null),
+                new SuCommand(new String[]{"su", "0"}, stdin),
+                new SuCommand(new String[]{"su", "-c", "sh", "-c", command}, null),
+                new SuCommand(new String[]{"su", "-c", command}, null),
+                new SuCommand(new String[]{"su"}, stdin)
+        };
 
-            BufferedReader stdOut = new BufferedReader(new InputStreamReader(process.getInputStream()));
-            String s;
-            while ((s = stdOut.readLine()) != null) {
-                builder.append(s);
-            }
-            BufferedReader stdError = new BufferedReader(new InputStreamReader(process.getErrorStream()));
-            while ((s = stdError.readLine()) != null) {
-                builder.append(s);
-            }
+        String lastOutput = "";
+        Exception lastException = null;
 
-            process.waitFor();
-            stdOut.close();
-            stdError.close();
+        for (SuCommand suCommand : suCommands) {
+            try {
+                CommandResult result = execCommand(suCommand.command, suCommand.stdin);
+                lastOutput = result.output == null ? "" : result.output;
 
-            if (builder.length() > 0 && !builder.toString().equals("Success")) {
-                throw new InstallationFailedException(builder.toString());
+                if (!isRootInstallSuccess(result)) {
+                    // pm/am reported an error; try next su variant first, then bubble up.
+                    continue;
+                }
+
+                // Success reached; nothing else to do.
+                return;
+            } catch (Exception e) {
+                lastException = e;
+                lastOutput = e.getMessage();
             }
-        } catch (Exception e) {
-            throw new RootException(e);
-        } finally {
-            if (process != null) {
-                process.destroy();
-            }
+        }
+
+        // If we get here, all su variants failed.
+        if (lastException != null) {
+            throw new RootException(new Exception("Root command failed: " + lastOutput, lastException));
+        } else if (!"".equals(lastOutput)) {
+            throw new RootException(new Exception(lastOutput));
+        } else {
+            throw new RootException(new Exception("Root command failed"));
         }
     }
 
@@ -159,6 +211,64 @@ public class ApkInstaller {
 
         s.commit(pendingIntent.getIntentSender());
         s.close();
+    }
+
+    private static boolean isRootInstallSuccess(CommandResult result) {
+        String output = result.output == null ? "" : result.output.trim();
+        if (output.isEmpty()) {
+            return result.exitCode == 0;
+        }
+
+        String normalized = output.toLowerCase(Locale.US);
+        if (normalized.contains("success")) {
+            return true;
+        }
+        if (normalized.contains("failure") || normalized.contains("error")) {
+            return false;
+        }
+
+        return result.exitCode == 0;
+    }
+
+    private static CommandResult execCommand(String[] command, String stdin)
+            throws IOException, InterruptedException {
+        Process process = Runtime.getRuntime().exec(command);
+        if (stdin != null) {
+            OutputStream out = process.getOutputStream();
+            out.write(stdin.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            out.close();
+        }
+
+        String stdOut = readStream(process.getInputStream());
+        String stdErr = readStream(process.getErrorStream());
+        int exitCode = process.waitFor();
+        process.destroy();
+
+        String output;
+        if (!stdOut.isEmpty() && !stdErr.isEmpty()) {
+            output = stdOut + "\n" + stdErr;
+        } else if (!stdOut.isEmpty()) {
+            output = stdOut;
+        } else {
+            output = stdErr;
+        }
+
+        return new CommandResult(exitCode, output);
+    }
+
+    private static String readStream(InputStream inputStream) throws IOException {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
+        StringBuilder builder = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            if (builder.length() > 0) {
+                builder.append('\n');
+            }
+            builder.append(line);
+        }
+        reader.close();
+        return builder.toString();
     }
 
 }

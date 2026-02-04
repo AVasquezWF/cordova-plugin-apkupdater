@@ -12,6 +12,7 @@ import de.kolbasa.apkupdater.downloader.Progress;
 import de.kolbasa.apkupdater.exceptions.ActionInProgressException;
 import de.kolbasa.apkupdater.exceptions.DownloadInProgressException;
 import de.kolbasa.apkupdater.exceptions.DownloadNotRunningException;
+import de.kolbasa.apkupdater.exceptions.RootException;
 import de.kolbasa.apkupdater.tools.ApkInstaller;
 import de.kolbasa.apkupdater.tools.AppData;
 import de.kolbasa.apkupdater.tools.PermissionManager;
@@ -191,9 +192,28 @@ public class ApkUpdater extends CordovaPlugin {
     }
 
     private void rootInstall(CallbackContext callbackContext) {
+        File updateFile;
         try {
-            ApkInstaller.rootInstall(cordova.getContext(), getUpdate().getInstallFile());
+            updateFile = getUpdate().getInstallFile();
+        } catch (Exception e) {
+            callbackContext.error(StackExtractor.format(e));
+            return;
+        }
+
+        try {
+            ApkInstaller.rootInstall(cordova.getContext(), updateFile);
             callbackContext.success();
+        } catch (RootException rootException) {
+            try {
+                ApkInstaller.install(cordova.getContext(), updateFile);
+                callbackContext.success();
+            } catch (Exception installException) {
+                Exception combined = new Exception(
+                        "Root install failed: " + rootException.getMessage()
+                                + ". Fallback install failed: " + installException.getMessage(),
+                        installException);
+                callbackContext.error(StackExtractor.format(combined));
+            }
         } catch (Exception e) {
             callbackContext.error(StackExtractor.format(e));
         }
